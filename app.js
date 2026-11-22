@@ -213,11 +213,12 @@ const App = {
 
   today() { return new Date().toISOString().slice(0, 10); },
 
-  toast(msg) {
+  toast(msg, duration = 3000) {
     const el = document.getElementById('toastMsg');
+    if (!el) return;
     el.textContent = msg; el.classList.add('show');
     clearTimeout(App._tt);
-    App._tt = setTimeout(() => el.classList.remove('show'), 2800);
+    App._tt = setTimeout(() => el.classList.remove('show'), duration);
   },
 
   openSheet(id) { document.getElementById(id)?.classList.add('open'); },
@@ -1541,11 +1542,12 @@ const Settings = {
           <div class="settings-card-desc">Kategori setup untuk jurnal & evaluasi emosi</div>
           <div class="settings-tags-list" id="settingsTagsList">
             ${tagsHtml}
-            <button class="settings-tag-add-btn" onclick="Settings.showAddTagPrompt()">+ Tambah</button>
+            <button class="settings-tag-add-btn" type="button" onclick="Settings.focusNewMethodInput()">+ Tambah</button>
           </div>
-          <div class="settings-card-action">
-            <button class="settings-save-method-btn" onclick="Settings.saveMethods()">
-              <i class="bi bi-check2"></i> Simpan Metode
+          <div class="settings-add-tag-row" style="display:flex;gap:8px;margin-top:10px">
+            <input type="text" id="newMethodInput" class="settings-conv-input" style="flex:1" placeholder="Tulis nama metode baru (cth: Supply & Demand)..." onkeydown="if(event.key==='Enter'){event.preventDefault();Settings.addMethodFromInput();}" />
+            <button type="button" class="settings-conv-btn" onclick="Settings.addMethodFromInput()" style="white-space:nowrap">
+              <i class="bi bi-plus-circle-fill me-1"></i> Tambah
             </button>
           </div>
         </div>
@@ -1599,22 +1601,56 @@ const Settings = {
     this.render();
   },
 
-  removeTag(tag) {
+  async removeTag(tag) {
     this._tags = this._tags.filter(t => t !== tag);
     if (this._selectedTag === tag) this._selectedTag = this._tags[0] || '';
+    await this.saveMethods(false);
     this.render();
+    App.toast('🗑️ Metode dihapus');
+  },
+
+  focusNewMethodInput() {
+    const input = document.getElementById('newMethodInput');
+    if (input) {
+      input.focus();
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else {
+      this.showAddTagPrompt();
+    }
   },
 
   showAddTagPrompt() {
     const val = prompt('Masukkan nama metode / strategi trading baru:');
-    if (val && val.trim()) {
-      const clean = val.trim();
-      if (!this._tags.includes(clean)) {
-        this._tags.push(clean);
-        this._selectedTag = clean;
-        this.render();
-      }
+    if (val) this.addMethod(val);
+  },
+
+  async addMethodFromInput() {
+    const input = document.getElementById('newMethodInput');
+    if (!input) return;
+    const val = input.value;
+    if (!val || !val.trim()) {
+      App.toast('Ketik nama metode terlebih dahulu');
+      input.focus();
+      return;
     }
+    await this.addMethod(val);
+    const refreshedInput = document.getElementById('newMethodInput');
+    if (refreshedInput) refreshedInput.value = '';
+  },
+
+  async addMethod(name) {
+    const clean = (name || '').trim();
+    if (!clean) return;
+    const exists = this._tags.some(t => t.toLowerCase() === clean.toLowerCase());
+    if (exists) {
+      App.toast('⚠️ Metode "' + clean + '" sudah ada!');
+      return;
+    }
+    this._tags.push(clean);
+    this._selectedTag = clean;
+    await this.saveMethods(false);
+    this.render();
+    App.toast('✅ Metode "' + clean + '" ditambahkan!');
   },
 
   accCard(a, idx) {
@@ -1858,11 +1894,11 @@ const Settings = {
     });
   },
 
-  async saveMethods() {
+  async saveMethods(showToast = true) {
     const str = this._tags.join(',');
     await API.updateSettings({ tradingMethods: str });
     App.state.settings = DB.getSettings();
-    App.toast('✅ Metode disimpan!');
+    if (showToast) App.toast('✅ Metode disimpan!');
   },
 
   async saveConv() {
@@ -1906,10 +1942,19 @@ const Settings = {
     const progressText = document.getElementById('mt5ProgressText');
 
     btn.disabled = true;
-    if (progressBox) progressBox.style.display = 'block';
+    if (progressBox) {
+      progressBox.style.display = 'block';
+      progressBox.style.background = 'rgba(255,215,0,0.08)';
+      progressBox.style.borderColor = 'rgba(255,215,0,0.25)';
+      progressBox.innerHTML = `
+        <span class="loader-gold" style="width:18px;height:18px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></span>
+        <span id="mt5ProgressText" style="font-size:13px;color:#F0F0FF;vertical-align:middle">Menghubungkan akun ke MetaApi Cloud...</span>
+      `;
+    }
 
     const updateProgress = (msg) => {
-      if (progressText) progressText.textContent = msg;
+      const pText = document.getElementById('mt5ProgressText');
+      if (pText) pText.textContent = msg;
     };
 
     try {
@@ -1955,7 +2000,7 @@ const Settings = {
       const syncRes = await MetaApiSync.syncAccount(newAcc, updateProgress);
 
       App.closeSheet('accountSheet');
-      App.toast(`✅ Akun MT5 terhubung! ${syncRes.newTradesCount} transaksi disinkronkan.`);
+      App.toast(`✅ Akun MT5 terhubung! ${syncRes.newTradesCount} transaksi disinkronkan.`, 4000);
 
       await Promise.all([
         Settings.render(),
@@ -1964,10 +2009,21 @@ const Settings = {
       ]);
     } catch (err) {
       console.error('Connect MT5 Error:', err);
-      App.toast('❌ Gagal: ' + (err.message || 'Periksa server broker, login, atau password'));
+      const errMsg = err.message || 'Periksa server broker, login, atau password';
+      App.toast('❌ ' + errMsg, 6000);
+      if (progressBox) {
+        progressBox.style.display = 'block';
+        progressBox.style.background = 'rgba(239,68,68,0.12)';
+        progressBox.style.borderColor = 'rgba(239,68,68,0.3)';
+        progressBox.innerHTML = `
+          <div style="color:#EF4444;font-size:13px;line-height:1.5;text-align:left">
+            <strong><i class="bi bi-exclamation-triangle-fill me-1"></i> Gagal Menghubungkan MT5:</strong><br>
+            ${errMsg}
+          </div>
+        `;
+      }
     } finally {
       btn.disabled = false;
-      if (progressBox) progressBox.style.display = 'none';
     }
   },
 
