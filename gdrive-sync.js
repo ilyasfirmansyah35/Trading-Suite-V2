@@ -17,6 +17,7 @@ const GDriveSync = {
   _isSyncing: false,
   _syncDebounce: null,
   _lastSyncTime: null,
+  _silentRefreshPending: false,
 
   /**
    * Initialize Google Sync module
@@ -40,6 +41,7 @@ const GDriveSync = {
     }
 
     // Initialize GIS Token Client when Google library is ready
+    // Also attempt silent refresh if profile exists but token expired
     this._initGisClient();
   },
 
@@ -56,11 +58,19 @@ const GDriveSync = {
         callback: async (resp) => {
           if (resp.error) {
             console.error('Google Auth Error:', resp);
-            App.toast('❌ Gagal login Google: ' + resp.error);
+            // If silent refresh failed (e.g. no active Google session), show login modal
+            if (this._silentRefreshPending) {
+              this._silentRefreshPending = false;
+              this.showLoginModal();
+            } else {
+              App.toast('❌ Gagal login Google: ' + resp.error);
+            }
             this.setSyncingState(false);
             return;
           }
           if (resp.access_token) {
+            const wasSilent = this._silentRefreshPending;
+            this._silentRefreshPending = false;
             this._accessToken = resp.access_token;
             this._tokenExpiresAt = Date.now() + (parseInt(resp.expires_in, 10) || 3600) * 1000;
             localStorage.setItem('ts_google_token', this._accessToken);
@@ -69,14 +79,41 @@ const GDriveSync = {
             // Fetch user profile
             await this.fetchUserProfile();
 
-            // Run initial sync down / up
-            await this.handlePostLoginSync();
+            if (wasSilent) {
+              // Silent auto-login berhasil — restore session langsung
+              this.hideLoginModal();
+              await this.handlePostLoginSync();
+            } else {
+              // Manual login flow
+              await this.handlePostLoginSync();
+            }
           }
         }
       });
+
+      // After GIS is ready, attempt silent refresh if profile exists but token is expired
+      if (this._userProfile && (!this._accessToken || Date.now() >= this._tokenExpiresAt)) {
+        this._attemptSilentRefresh();
+      }
     } catch (err) {
       console.error('Failed to initTokenClient:', err);
     }
+  },
+
+  /**
+   * Attempt silent token refresh (no popup).
+   * Works if the user still has an active Google session in the browser.
+   */
+  _attemptSilentRefresh() {
+    if (!this._tokenClient) {
+      setTimeout(() => this._attemptSilentRefresh(), 500);
+      return;
+    }
+    console.log('[GDriveSync] Attempting silent token refresh...');
+    this._silentRefreshPending = true;
+    this.setSyncingState(true, 'Memulihkan sesi Google...');
+    // prompt: '' = silent (no popup); if no active session, callback gets error
+    this._tokenClient.requestAccessToken({ prompt: '' });
   },
 
   /**
@@ -85,15 +122,13 @@ const GDriveSync = {
   signIn() {
     if (!this._tokenClient) {
       this._initGisClient();
-    }
-    if (!this._tokenClient) {
       App.toast('⚠️ Sedang memuat Google Service, silakan coba 2 detik lagi...');
       return;
     }
 
     this.setSyncingState(true, 'Menghubungkan ke Google...');
-    // Request access token with popup
-    this._tokenClient.requestAccessToken({ prompt: '' });
+    // prompt: 'select_account' forces account picker popup
+    this._tokenClient.requestAccessToken({ prompt: 'select_account' });
   },
 
   /**
@@ -409,6 +444,8 @@ const GDriveSync = {
   },
 
   showLoginModal() {
+    // Don't show login modal if silent refresh is in progress
+    if (this._silentRefreshPending) return;
     const m = document.getElementById('googleLoginModal');
     if (m) m.style.display = 'flex';
   },
