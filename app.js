@@ -41,15 +41,30 @@ const API = {
 
   // Trades
   getTrades(accId, filters = {}) {
-    let trades = DB.getTrades().filter(t => t.AccountID === accId);
+    const rawTrades = DB.getTrades();
+    let trades = rawTrades
+      .map((t, idx) => ({ ...t, _origIdx: idx }))
+      .filter(t => t.AccountID === accId);
     if (filters.month) trades = trades.filter(t => (t.Date || '').slice(5, 7) === filters.month);
-    trades.sort((a, b) => b.Date.localeCompare(a.Date));
+    
+    // Urut yang terbaru dicatat di paling atas
+    trades.sort((a, b) => {
+      // 1. Tanggal trade (Date) descending
+      const dc = (b.Date || '').localeCompare(a.Date || '');
+      if (dc !== 0) return dc;
+      // 2. Timestamp createdAt
+      const ta = a.createdAt || (a.TradeID ? parseInt(a.TradeID, 36) : 0) || 0;
+      const tb = b.createdAt || (b.TradeID ? parseInt(b.TradeID, 36) : 0) || 0;
+      if (tb !== ta) return tb - ta;
+      // 3. Urutan pencatatan (index array terakhir di atas)
+      return (b._origIdx || 0) - (a._origIdx || 0);
+    });
     return Promise.resolve(trades);
   },
   addTrade(d) {
     const trades = DB.getTrades();
     const pl = parseFloat(d.ProfitLoss) || 0;
-    const t = { ...d, TradeID: DB.uid(), Result: pl > 0 ? 'Win' : pl < 0 ? 'Loss' : 'BE' };
+    const t = { ...d, TradeID: DB.uid(), Result: pl > 0 ? 'Win' : pl < 0 ? 'Loss' : 'BE', createdAt: Date.now() };
     trades.push(t); DB.savTrades(trades);
     if (typeof GDriveSync !== 'undefined') GDriveSync.triggerAutoSync();
     return Promise.resolve({ success: true });
@@ -211,7 +226,41 @@ const App = {
     return new Date(str + 'T00:00').toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
   },
 
-  today() { return new Date().toISOString().slice(0, 10); },
+  getCentRate() {
+    // Nilai 1 Cent = kurs sekarang dihilangkan 2 digit belakangnya
+    // Contoh: $1 = Rp 18.276 -> hilangkan 76 -> 1 Cent = Rp 182
+    const r = Math.round(Calculator._rate || 16250);
+    const s = String(r);
+    return s.length > 2 ? parseInt(s.slice(0, -2), 10) : Math.floor(r / 100);
+  },
+
+  today() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  },
+
+  yesterday() {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  },
+
+  startOfWeek() {
+    const d = new Date();
+    const day = d.getDay(); // 0: Sun, 1: Mon
+    const diff = day === 0 ? 6 : day - 1;
+    d.setDate(d.getDate() - diff);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dayStr = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dayStr}`;
+  },
 
   toast(msg, duration = 3000) {
     const el = document.getElementById('toastMsg');
@@ -460,9 +509,45 @@ const Dashboard = {
     const fmt = v => App.fmt(v, cur);
     const netPct = s.initialBalance > 0 ? ((s.netProfit / s.initialBalance) * 100).toFixed(2) : '0.00';
     const rateText = Calculator._rate ? `$1 = Rp ${Math.round(Calculator._rate).toLocaleString('id-ID')}` : '$1 = Rp 16.250';
+    const centRate = App.getCentRate();
+    const usdRate = Calculator._rate || 16250;
 
-    // Recent trades for "Trade Terakhir"
-    const allTrades = DB.getTrades().filter(t => t.AccountID === App.state.currentAccountId).sort((a, b) => b.Date.localeCompare(a.Date));
+    let idrProfit = 0;
+    let idrProfitStr = '';
+    let rateBadgeHtml = '';
+
+    if (cur === 'Cent') {
+      idrProfit = Math.round(s.netProfit * centRate);
+      rateBadgeHtml = `<span class="dash-cent-badge" onclick="event.stopPropagation(); Calculator.fetchRate(); App.toast('🔄 Memperbarui kurs live...');" title="Kurs live otomatis: 1 Cent = Rp ${centRate} (Klik untuk refresh)">1¢ = Rp ${centRate.toLocaleString('id-ID')}</span>`;
+    } else if (cur === 'USD') {
+      idrProfit = Math.round(s.netProfit * usdRate);
+      rateBadgeHtml = `<span class="dash-cent-badge" onclick="event.stopPropagation(); Calculator.fetchRate(); App.toast('🔄 Memperbarui kurs live...');" title="Kurs Live USD (Klik untuk refresh)">$1 = Rp ${Math.round(usdRate).toLocaleString('id-ID')}</span>`;
+    } else {
+      idrProfit = Math.round(s.netProfit);
+      rateBadgeHtml = '';
+    }
+
+    if (idrProfit > 0) {
+      idrProfitStr = '+Rp ' + Math.abs(idrProfit).toLocaleString('id-ID');
+    } else if (idrProfit < 0) {
+      idrProfitStr = '-Rp ' + Math.abs(idrProfit).toLocaleString('id-ID');
+    } else {
+      idrProfitStr = 'Rp 0';
+    }
+
+    // Recent trades for "Trade Terakhir" (urut yang terbaru dicatat)
+    const rawAll = DB.getTrades();
+    const allTrades = rawAll
+      .map((t, idx) => ({ ...t, _origIdx: idx }))
+      .filter(t => t.AccountID === App.state.currentAccountId)
+      .sort((a, b) => {
+        const dc = (b.Date || '').localeCompare(a.Date || '');
+        if (dc !== 0) return dc;
+        const ta = a.createdAt || (a.TradeID ? parseInt(a.TradeID, 36) : 0) || 0;
+        const tb = b.createdAt || (b.TradeID ? parseInt(b.TradeID, 36) : 0) || 0;
+        if (tb !== ta) return tb - ta;
+        return (b._origIdx || 0) - (a._origIdx || 0);
+      });
     const recentTrades = allTrades.slice(0, 2);
     let recentTradesHtml = '';
     if (recentTrades.length > 0) {
@@ -514,10 +599,14 @@ const Dashboard = {
         </div>
 
         <div class="dash-balance-block">
-          <div class="dash-balance-label">Saldo Saat Ini · ${acc ? acc.Name : 'Main Account'}</div>
+          <div class="dash-balance-label">Saldo Saat Ini · ${acc ? acc.Name : 'Main Account'}${cur === 'Cent' ? ` · <span style="color:#CBD5E1;font-weight:600">≈ Rp ${Math.round(s.currentBalance * centRate).toLocaleString('id-ID')}</span>` : ''}</div>
           <div class="dash-balance-val">${fmt(s.currentBalance)}</div>
           <div class="dash-net-pl ${s.netProfit >= 0 ? 't-win' : 't-loss'}">
             ${s.netProfit >= 0 ? '▲ +' : '▼ -'}${fmt(Math.abs(s.netProfit))} (${netPct}%) net P/L
+          </div>
+          <div class="dash-total-idr-row">
+            <span class="dash-total-idr-label">Total Pendapatan:</span>
+            <span class="dash-total-idr-val ${idrProfit >= 0 ? 't-win' : 't-loss'}">${idrProfitStr}</span>
           </div>
         </div>
 
@@ -539,7 +628,7 @@ const Dashboard = {
         <div class="daily-progress-card">
           <div class="dpc-top">
             <span class="dpc-label">PROGRES HARI INI</span>
-            <span class="dpc-val ${d.todayProfit >= 0 ? 't-win' : 't-loss'}">${d.todayProfit >= 0 ? '+' : ''}${fmt(d.todayProfit)}</span>
+            <span class="dpc-val ${d.todayProfit >= 0 ? 't-win' : 't-loss'}">${d.todayProfit >= 0 ? '+' : ''}${fmt(d.todayProfit)}${cur === 'Cent' && d.todayProfit !== 0 ? ` <span style="font-size:11px;opacity:0.85;font-weight:600">(≈ ${d.todayProfit >= 0 ? '+Rp ' : '-Rp '}${Math.abs(Math.round(d.todayProfit * centRate)).toLocaleString('id-ID')})</span>` : ''}</span>
           </div>
           <div class="dpc-metric">
             <div class="dpc-text">Target Harian: ${fmt(d.dailyTarget || (s.initialBalance * 0.05))} (${Math.round(d.targetProgress)}%)</div>
@@ -725,6 +814,9 @@ const Trades = {
   _trades: [],
   _filterMonth: '',
   _filterResult: 'all', // 'all' | 'Win' | 'Loss'
+  _filterPeriod: 'all', // 'all' | 'today' | 'yesterday' | 'week' | 'custom'
+  _customStartDate: '',
+  _customEndDate: '',
   _searchQuery: '',
   _months: [
     { v: '', t: 'Semua Bulan' },
@@ -741,7 +833,8 @@ const Trades = {
       el.innerHTML = `<div class="empty-state fade-up"><div class="empty-state-icon"><i class="bi bi-person-slash"></i></div><h3>Belum ada akun</h3></div>`;
       return;
     }
-    this._trades = await API.getTrades(App.state.currentAccountId, { month: this._filterMonth });
+    const filterOpt = this._filterPeriod !== 'all' ? {} : { month: this._filterMonth };
+    this._trades = await API.getTrades(App.state.currentAccountId, filterOpt);
     this.buildList(el);
   },
 
@@ -750,18 +843,120 @@ const Trades = {
     this.renderCardsOnly();
   },
 
+  async setPeriodFilter(p) {
+    if (p === 'custom') {
+      this.openCustomPeriodPicker();
+      return;
+    }
+    this._filterPeriod = p;
+    const filterOpt = this._filterPeriod !== 'all' ? {} : { month: this._filterMonth };
+    this._trades = await API.getTrades(App.state.currentAccountId, filterOpt);
+    this.renderCardsOnly();
+  },
+
+  formatCustomPeriodLabel() {
+    if (!this._customStartDate && !this._customEndDate) return 'Pilih Tanggal';
+    const fmt = (dStr) => {
+      if (!dStr) return '';
+      const parts = dStr.split('-');
+      if (parts.length === 3) {
+        const day = parseInt(parts[2], 10);
+        const mIdx = parseInt(parts[1], 10) - 1;
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+        return `${day} ${months[mIdx] || ''}`;
+      }
+      return dStr;
+    };
+    if (this._customStartDate === this._customEndDate) {
+      return fmt(this._customStartDate);
+    }
+    return `${fmt(this._customStartDate)} - ${fmt(this._customEndDate)}`;
+  },
+
+  openCustomPeriodPicker() {
+    const startInp = document.getElementById('customPeriodStart');
+    const endInp = document.getElementById('customPeriodEnd');
+    const today = App.today();
+    if (startInp) startInp.value = this._customStartDate || today;
+    if (endInp) endInp.value = this._customEndDate || today;
+    App.openSheet('customPeriodSheet');
+  },
+
+  cancelCustomPeriod() {
+    App.closeSheet('customPeriodSheet');
+    const pSel = document.getElementById('journalPeriodSelect');
+    if (pSel) pSel.value = this._filterPeriod || 'all';
+  },
+
+  async applyCustomPeriod() {
+    const startInp = document.getElementById('customPeriodStart');
+    const endInp = document.getElementById('customPeriodEnd');
+    let startVal = startInp ? startInp.value : '';
+    let endVal = endInp ? endInp.value : '';
+
+    if (!startVal && !endVal) {
+      App.toast('Pilih tanggal terlebih dahulu');
+      return;
+    }
+    if (startVal && endVal && startVal > endVal) {
+      const temp = startVal;
+      startVal = endVal;
+      endVal = temp;
+      if (startInp) startInp.value = startVal;
+      if (endInp) endInp.value = endVal;
+    }
+    this._customStartDate = startVal || endVal;
+    this._customEndDate = endVal || startVal;
+    this._filterPeriod = 'custom';
+    App.closeSheet('customPeriodSheet');
+
+    // Reload trades across all months to ensure custom range is complete
+    this._trades = await API.getTrades(App.state.currentAccountId, {});
+    this.renderCardsOnly();
+  },
+
   onSearch(query) {
     this._searchQuery = (query || '').toLowerCase().trim();
     this.renderCardsOnly();
   },
 
+  isTradeInPeriod(tDate) {
+    if (!this._filterPeriod || this._filterPeriod === 'all') return true;
+    const dStr = (tDate || '').slice(0, 10);
+    const today = App.today();
+    if (this._filterPeriod === 'today') return dStr === today;
+    if (this._filterPeriod === 'yesterday') return dStr === App.yesterday();
+    if (this._filterPeriod === 'week') {
+      const mon = App.startOfWeek();
+      return dStr >= mon && dStr <= today;
+    }
+    if (this._filterPeriod === 'custom') {
+      if (this._customStartDate && this._customEndDate) {
+        return dStr >= this._customStartDate && dStr <= this._customEndDate;
+      } else if (this._customStartDate) {
+        return dStr >= this._customStartDate;
+      } else if (this._customEndDate) {
+        return dStr <= this._customEndDate;
+      }
+      return true;
+    }
+    return true;
+  },
+
+  getTradesForPeriod() {
+    return this._trades.filter(t => this.isTradeInPeriod(t.Date));
+  },
+
   getFilteredTrades() {
     return this._trades.filter(t => {
-      // Filter by result tab
+      // 1. Filter by period
+      if (!this.isTradeInPeriod(t.Date)) return false;
+
+      // 2. Filter by result tab
       if (this._filterResult === 'Win' && t.Result !== 'Win') return false;
       if (this._filterResult === 'Loss' && t.Result !== 'Loss') return false;
 
-      // Filter by search query
+      // 3. Filter by search query
       if (this._searchQuery) {
         const q = this._searchQuery;
         const pair = (t.Pair || t.Instrument || 'XAUUSD').toLowerCase();
@@ -782,19 +977,99 @@ const Trades = {
     const cur = acc ? acc.Currency : 'USD';
     const fmt = v => App.fmt(v, cur);
 
+    // Period trades summary
+    const periodTrades = this.getTradesForPeriod();
+    const pTotal = periodTrades.length;
+    const pWins = periodTrades.filter(t => t.Result === 'Win').length;
+    const pLosses = periodTrades.filter(t => t.Result === 'Loss').length;
+    const pNetPL = periodTrades.reduce((s, t) => s + (parseFloat(t.ProfitLoss) || 0), 0);
+    const pWinRate = pTotal > 0 ? ((pWins / pTotal) * 100).toFixed(1) : '0.0';
+
+    // Update tab labels with counts
+    const btnAll = document.getElementById('jtab-all');
+    if (btnAll) btnAll.textContent = `Semua (${pTotal})`;
+    const btnWin = document.getElementById('jtab-Win');
+    if (btnWin) btnWin.textContent = `Win (${pWins})`;
+    const btnLoss = document.getElementById('jtab-Loss');
+    if (btnLoss) btnLoss.textContent = `Loss (${pLosses})`;
+
     // Update active tab buttons
     ['all', 'Win', 'Loss'].forEach(r => {
       const btn = document.getElementById('jtab-' + r);
       if (btn) btn.classList.toggle('active', this._filterResult === r);
     });
 
+    let pLabel = 'Bulan Ini';
+    let pBtnLabel = 'Semua Periode';
+    if (this._filterPeriod === 'today') { pLabel = 'Hari Ini'; pBtnLabel = 'Hari Ini'; }
+    else if (this._filterPeriod === 'yesterday') { pLabel = 'Kemarin'; pBtnLabel = 'Kemarin'; }
+    else if (this._filterPeriod === 'week') { pLabel = 'Minggu Ini'; pBtnLabel = 'Minggu Ini'; }
+    else if (this._filterPeriod === 'custom') {
+      const customTxt = this.formatCustomPeriodLabel();
+      pLabel = customTxt;
+      pBtnLabel = customTxt;
+    }
+
+    // Update period pill display & label
+    const pLabelEl = document.getElementById('journalPeriodLabel');
+    if (pLabelEl) pLabelEl.textContent = pBtnLabel;
+    const pPillEl = document.getElementById('journalPeriodPill');
+    if (pPillEl) pPillEl.classList.toggle('active', this._filterPeriod !== 'all');
+
+    // Update overlay select value
+    const pSel = document.getElementById('journalPeriodSelect');
+    if (pSel) pSel.value = this._filterPeriod || 'all';
+
+    // Update Hero card stats
+    const heroBadge = document.getElementById('journalHeroBadge');
+    const heroCount = document.getElementById('journalHeroCount');
+    const heroLabel = document.getElementById('journalHeroLabel');
+    const heroVal = document.getElementById('journalHeroVal');
+    const heroWr = document.getElementById('journalHeroWr');
+    const heroSub = document.getElementById('journalHeroSub');
+
+    if (heroBadge) heroBadge.textContent = this._filterPeriod !== 'all' ? `Performa ${pLabel}` : 'Performa Bulan';
+    if (heroLabel) heroLabel.textContent = `Total Net P/L ${pLabel}`;
+    if (heroCount) heroCount.textContent = `${pTotal} Trades Total`;
+    if (heroVal) heroVal.textContent = `${pNetPL >= 0 ? '+' : ''}${fmt(pNetPL)}`;
+    if (heroWr) {
+      heroWr.style.color = pWinRate >= 50 ? '#10B981' : '#EE4444';
+      heroWr.innerHTML = `<span>${pWinRate >= 50 ? '▲' : '▼'}</span><span>${pWinRate}% Win Rate</span>`;
+    }
+    if (heroSub) {
+      const centRate = App.getCentRate();
+      const idrNet = Math.round(pNetPL * centRate);
+      if (cur === 'Cent' && pNetPL !== 0) {
+        heroSub.textContent = `≈ ${idrNet >= 0 ? '+Rp ' : '-Rp '}${Math.abs(idrNet).toLocaleString('id-ID')} (1¢ = Rp ${centRate})`;
+        heroSub.style.display = 'block';
+      } else {
+        heroSub.style.display = 'none';
+      }
+    }
+
     const filtered = this.getFilteredTrades();
 
     if (filtered.length === 0) {
+      let emptyMsg = 'Belum Ada Catatan Trade';
+      let emptySub = 'Klik tombol kuning <strong>+</strong> di bawah untuk mencatat trade baru.';
+      if (this._filterPeriod === 'today') {
+        emptyMsg = 'Belum Ada Trade Hari Ini';
+        emptySub = 'Anda belum mencatat trade pada hari ini.';
+      } else if (this._filterPeriod === 'yesterday') {
+        emptyMsg = 'Tidak Ada Trade Kemarin';
+        emptySub = 'Tidak ditemukan catatan trade dari hari kemarin.';
+      } else if (this._filterPeriod === 'week') {
+        emptyMsg = 'Belum Ada Trade Minggu Ini';
+        emptySub = 'Tidak ditemukan catatan trade sepanjang minggu ini.';
+      } else if (this._filterPeriod === 'custom') {
+        emptyMsg = 'Tidak Ada Trade Pada Periode Ini';
+        emptySub = 'Tidak ditemukan catatan trade pada rentang tanggal yang dipilih.';
+      }
+
       container.innerHTML = `
         <div style="background:#FFFFFF;border:1px solid #E2E8F0;border-radius:18px;padding:36px 20px;text-align:center;box-shadow:0 2px 8px rgba(15,23,42,0.03)">
-          <div style="font-size:16px;font-weight:800;color:#0F172A;margin-bottom:6px">Belum Ada Catatan Trade</div>
-          <div style="font-size:13px;color:#94A3B8;max-width:260px;margin:0 auto 18px">Klik tombol kuning <strong>+</strong> di bawah untuk mencatat trade pertama Anda.</div>
+          <div style="font-size:16px;font-weight:800;color:#0F172A;margin-bottom:6px">${emptyMsg}</div>
+          <div style="font-size:13px;color:#94A3B8;max-width:260px;margin:0 auto 18px">${emptySub}</div>
           <button class="gold-btn" style="display:inline-flex;padding:10px 20px;font-size:13px" onclick="Trades.openAddModal()"><i class="bi bi-plus-lg me-2"></i>Tambah Trade</button>
         </div>
       `;
@@ -851,6 +1126,14 @@ const Trades = {
     const losses = this._trades.filter(t => t.Result === 'Loss').length;
     const netPL = this._trades.reduce((s, t) => s + (parseFloat(t.ProfitLoss) || 0), 0);
     const winRate = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : '0.0';
+    const centRate = App.getCentRate();
+    const idrNetPL = Math.round(netPL * centRate);
+
+    let pBtnLabel = 'Semua Periode';
+    if (this._filterPeriod === 'today') pBtnLabel = 'Hari Ini';
+    else if (this._filterPeriod === 'yesterday') pBtnLabel = 'Kemarin';
+    else if (this._filterPeriod === 'week') pBtnLabel = 'Minggu Ini';
+    else if (this._filterPeriod === 'custom') pBtnLabel = this.formatCustomPeriodLabel();
 
     el.innerHTML = `
       <div class="fade-up" style="padding-bottom: 90px;">
@@ -879,24 +1162,44 @@ const Trades = {
         <!-- Hero Performance Card -->
         <div class="journal-hero-card">
           <div class="journal-hero-top">
-            <span class="journal-hero-badge">Performa Bulan</span>
-            <span class="journal-hero-trades-count">${totalTrades} Trades Total</span>
+            <span class="journal-hero-badge" id="journalHeroBadge">Performa Bulan</span>
+            <span class="journal-hero-trades-count" id="journalHeroCount">${totalTrades} Trades Total</span>
           </div>
-          <div class="journal-hero-lbl">Total Net P/L Bulan Ini</div>
+          <div class="journal-hero-lbl" id="journalHeroLabel">Total Net P/L Bulan Ini</div>
           <div class="journal-hero-bottom">
-            <div class="journal-hero-val">${netPL >= 0 ? '+' : ''}${fmt(netPL)}</div>
-            <div class="journal-hero-wr" style="color: ${winRate >= 50 ? '#10B981' : '#EE4444'}">
+            <div>
+              <div class="journal-hero-val" id="journalHeroVal">${netPL >= 0 ? '+' : ''}${fmt(netPL)}</div>
+              <div id="journalHeroSub" style="font-size:11px;color:#94A3B8;font-weight:600;margin-top:2px;${cur === 'Cent' && netPL !== 0 ? '' : 'display:none'}">
+                ${cur === 'Cent' && netPL !== 0 ? `≈ ${idrNetPL >= 0 ? '+Rp ' : '-Rp '}${Math.abs(idrNetPL).toLocaleString('id-ID')} (1¢ = Rp ${centRate})` : ''}
+              </div>
+            </div>
+            <div class="journal-hero-wr" id="journalHeroWr" style="color: ${winRate >= 50 ? '#10B981' : '#EE4444'}">
               <span>${winRate >= 50 ? '▲' : '▼'}</span>
               <span>${winRate}% Win Rate</span>
             </div>
           </div>
         </div>
 
-        <!-- Filter Tabs: Semua, Win, Loss -->
-        <div class="journal-tabs-row">
-          <button type="button" class="journal-tab-pill ${this._filterResult === 'all' ? 'active' : ''}" id="jtab-all" onclick="Trades.setResultFilter('all')">Semua (${totalTrades})</button>
-          <button type="button" class="journal-tab-pill ${this._filterResult === 'Win' ? 'active' : ''}" id="jtab-Win" onclick="Trades.setResultFilter('Win')">Win (${wins})</button>
-          <button type="button" class="journal-tab-pill ${this._filterResult === 'Loss' ? 'active' : ''}" id="jtab-Loss" onclick="Trades.setResultFilter('Loss')">Loss (${losses})</button>
+        <!-- Filter Tabs & Period Filter -->
+        <div class="journal-filter-row">
+          <div class="journal-tabs-row">
+            <button type="button" class="journal-tab-pill ${this._filterResult === 'all' ? 'active' : ''}" id="jtab-all" onclick="Trades.setResultFilter('all')">Semua (${totalTrades})</button>
+            <button type="button" class="journal-tab-pill ${this._filterResult === 'Win' ? 'active' : ''}" id="jtab-Win" onclick="Trades.setResultFilter('Win')">Win (${wins})</button>
+            <button type="button" class="journal-tab-pill ${this._filterResult === 'Loss' ? 'active' : ''}" id="jtab-Loss" onclick="Trades.setResultFilter('Loss')">Loss (${losses})</button>
+          </div>
+          <div class="journal-period-picker-wrap">
+            <div class="journal-period-pill ${this._filterPeriod !== 'all' ? 'active' : ''}" id="journalPeriodPill">
+              <span id="journalPeriodLabel">${pBtnLabel}</span>
+              <i class="bi bi-caret-down-fill ms-1" style="font-size:9px"></i>
+            </div>
+            <select id="journalPeriodSelect" class="journal-period-select-overlay" onfocus="this.dataset.prev = this.value; this.value = ''" onblur="if(!this.value) this.value = Trades._filterPeriod || 'all'" onchange="Trades.setPeriodFilter(this.value)">
+              <option value="all" ${this._filterPeriod === 'all' ? 'selected' : ''}>Semua Periode</option>
+              <option value="today" ${this._filterPeriod === 'today' ? 'selected' : ''}>Hari Ini</option>
+              <option value="yesterday" ${this._filterPeriod === 'yesterday' ? 'selected' : ''}>Kemarin</option>
+              <option value="week" ${this._filterPeriod === 'week' ? 'selected' : ''}>Minggu Ini</option>
+              <option value="custom" ${this._filterPeriod === 'custom' ? 'selected' : ''}>Pilih Tanggal...</option>
+            </select>
+          </div>
         </div>
 
         <!-- Card List Container -->
@@ -1005,6 +1308,15 @@ const Calculator = {
     if (el) el.textContent = '$1 = Rp ' + Math.round(this._rate).toLocaleString('id-ID');
     const dEl = document.getElementById('dashRatePillText');
     if (dEl) dEl.textContent = '$1 = Rp ' + Math.round(this._rate).toLocaleString('id-ID');
+    // Refresh dashboard to recalculate Cent/USD rates
+    const pageDash = document.getElementById('page-dashboard');
+    if (pageDash && !pageDash.classList.contains('d-none') && typeof Dashboard !== 'undefined' && App.state.currentAccountId) {
+      Dashboard.render();
+    }
+    const pageSet = document.getElementById('page-settings');
+    if (pageSet && !pageSet.classList.contains('d-none') && typeof Settings !== 'undefined') {
+      Settings.render();
+    }
   },
 
   setTab(tab) {
@@ -1438,6 +1750,7 @@ const Settings = {
     const convVal = settings.conversionRatio || '100000 : 555';
     const rateText = Calculator._rate ? `Rp ${Math.round(Calculator._rate).toLocaleString('id-ID')}` : 'Rp 16.250';
     const displayConv = convVal.includes('(Rp') ? convVal : `${convVal} (${rateText})`;
+    const centRate = App.getCentRate();
 
     const isGoogleLoggedIn = typeof GDriveSync !== 'undefined' && GDriveSync.isLoggedIn();
     const gUser = (typeof GDriveSync !== 'undefined' && GDriveSync.getUser()) || null;
@@ -1573,16 +1886,25 @@ const Settings = {
           </div>
         </div>
 
-        <!-- KONVERSI CENT -> IDR (KURS) -->
+        <!-- KONVERSI CENT -> IDR (KURS LIVE) -->
         <div class="settings-card">
-          <div class="settings-card-title">Konversi Cent → IDR (Kurs)</div>
-          <div class="settings-card-desc">Format rasio konversi saldo Cent ke Rupiah</div>
-          <div class="settings-conv-row">
-            <input type="text" id="convRatioInput" class="settings-conv-input" value="${displayConv}" placeholder="100000 : 555 (Rp 16.250)" />
-            <button class="settings-conv-btn" onclick="Settings.saveConv()">Update Kurs</button>
+          <div class="settings-card-title">Konversi Akun Cent → Rupiah (Kurs Live)</div>
+          <div class="settings-card-desc">Nilai 1 Cent otomatis mengikuti kurs live USD saat ini dengan menghilangkan 2 digit di belakangnya.</div>
+          <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:12px;padding:12px 14px;margin-top:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:12px;color:#64748B">Kurs Live USD:</span>
+              <span style="font-size:13px;font-weight:700;color:#0F172A">$1 = Rp ${Math.round(Calculator._rate || 16250).toLocaleString('id-ID')}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="font-size:12px;color:#64748B">Nilai Konversi 1 Cent:</span>
+              <span style="font-size:14px;font-weight:800;color:#10B981">1 Cent = Rp ${centRate.toLocaleString('id-ID')}</span>
+            </div>
           </div>
-          <div class="settings-api-status">
-            <span class="status-dot-green">●</span> Live API Sync: ExchangeRate-API terhubung
+          <button class="settings-conv-btn" onclick="Calculator.fetchRate(); App.toast('🔄 Memperbarui kurs live...');" style="width:100%;margin-top:10px;justify-content:center">
+            <i class="bi bi-arrow-repeat me-1"></i> Perbarui Kurs Sekarang
+          </button>
+          <div class="settings-api-status" style="margin-top:8px">
+            <span class="status-dot-green">●</span> Formula: Kurs USD sekarang dihilangkan 2 digit belakang (1 USD = 100 Cent)
           </div>
         </div>
 
@@ -1899,6 +2221,37 @@ const Settings = {
     await API.updateSettings({ tradingMethods: str });
     App.state.settings = DB.getSettings();
     if (showToast) App.toast('✅ Metode disimpan!');
+  },
+
+  async saveCentRate() {
+    const raw = document.getElementById('centRateInput')?.value;
+    const val = parseFloat(raw) || 180;
+    await API.updateSettings({ centRate: val });
+    App.state.settings = DB.getSettings();
+    App.toast(`✅ Kurs Cent disimpan: 1 Cent = Rp ${val.toLocaleString('id-ID')}`);
+    if (typeof Dashboard !== 'undefined' && !document.getElementById('page-dashboard')?.classList.contains('d-none')) {
+      Dashboard.render();
+    }
+    this.render();
+  },
+
+  promptChangeCentRate() {
+    const current = parseFloat(App.state.settings?.centRate) || 180;
+    const res = prompt(`Atur nilai 1 Cent dalam Rupiah (saat ini: 1 Cent = Rp ${current}):`, current);
+    if (res !== null) {
+      const val = parseFloat(res);
+      if (!isNaN(val) && val > 0) {
+        API.updateSettings({ centRate: val }).then(() => {
+          App.state.settings = DB.getSettings();
+          App.toast(`✅ Kurs Cent diperbarui: 1 Cent = Rp ${val.toLocaleString('id-ID')}`);
+          if (typeof Dashboard !== 'undefined' && !document.getElementById('page-dashboard')?.classList.contains('d-none')) {
+            Dashboard.render();
+          }
+        });
+      } else {
+        App.toast('⚠️ Masukkan angka kurs yang valid');
+      }
+    }
   },
 
   async saveConv() {

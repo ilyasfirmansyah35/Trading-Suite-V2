@@ -17,7 +17,7 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;800;900&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap"
         rel="stylesheet" />
-    <link rel="stylesheet" href="style.css?v=2.3" />
+    <link rel="stylesheet" href="style.css?v=2.9.2" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 
@@ -327,6 +327,26 @@
         </div>
     </div>
 
+    <!-- Custom Period Picker Sheet -->
+    <div class="bottom-sheet" id="customPeriodSheet">
+        <div class="bottom-sheet-content">
+            <div class="sheet-handle"></div>
+            <div class="sheet-title"><i class="bi bi-calendar-range me-2"></i>Pilih Rentang Tanggal</div>
+            <div style="display:flex;gap:10px;margin-bottom:16px">
+                <div style="flex:1">
+                    <label style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px;display:block">Dari Tanggal</label>
+                    <input type="date" id="customPeriodStart" class="field" style="width:100%" />
+                </div>
+                <div style="flex:1">
+                    <label style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px;display:block">Sampai Tanggal</label>
+                    <input type="date" id="customPeriodEnd" class="field" style="width:100%" />
+                </div>
+            </div>
+            <button type="button" class="gold-btn w-100 mb-2" onclick="Trades.applyCustomPeriod()"><i class="bi bi-check-lg me-2"></i>Terapkan Filter</button>
+            <button type="button" class="ghost-btn w-100" onclick="Trades.cancelCustomPeriod()"><i class="bi bi-x-lg me-2"></i>Batal</button>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div class="toast-wrap">
         <div class="toast-msg" id="toastMsg"></div>
@@ -423,9 +443,9 @@
         </div>
     </div>
 
-    <script src="gdrive-sync.js?v=2.2"></script>
-    <script src="metaapi-sync.js?v=2.2"></script>
-    <script src="app.js?v=2.2"></script>
+    <script src="gdrive-sync.js?v=2.9.2"></script>
+    <script src="metaapi-sync.js?v=2.9.2"></script>
+    <script src="app.js?v=2.9.2"></script>
 </body>
 
 </html>

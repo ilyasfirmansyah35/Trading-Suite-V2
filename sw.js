@@ -1,4 +1,4 @@
-const CACHE = 'ts-v2.5';
+const CACHE = 'ts-v2.9.2';
 const SHELL = [
   './',
   './index.html',
