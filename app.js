@@ -443,9 +443,9 @@ const App = {
     // Initialize Google Drive Sync
     if (typeof GDriveSync !== 'undefined') {
       await GDriveSync.init();
-      // Show login modal on first visit if not signed in
-      const dismissed = sessionStorage.getItem('ts_login_dismissed');
-      if (!GDriveSync.isLoggedIn() && !dismissed) {
+      // Show login modal on first visit if not signed in and not dismissed
+      const dismissed = localStorage.getItem('ts_login_dismissed');
+      if (!GDriveSync.isLoggedIn() && !GDriveSync.hasSavedProfile() && !dismissed) {
         GDriveSync.showLoginModal();
       }
     }
@@ -554,15 +554,19 @@ const Dashboard = {
       recentTradesHtml = recentTrades.map(t => {
         const pSym = (t.Pair || t.Entry || 'XAU').replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase() || 'XAU';
         const isWin = t.Result === 'Win';
+        const isBuy = t.Position ? t.Position === 'BUY' : (parseFloat(t.ProfitLoss) >= 0);
+        const lot = t.LotSize || t.Lot || '0.50';
+        const strategy = t.Entry || t.Strategy || 'Manual Trade';
+        const rrDisplay = t.Result === 'Win' ? 'Win' : (t.Result === 'Loss' ? 'Loss' : 'BE');
         return `<div class="recent-trade-card">
           <div class="rtc-icon">${pSym}</div>
           <div class="rtc-info">
-            <div class="rtc-title">${t.Pair || 'XAUUSD'} · ${(t.Type || (isWin ? 'BUY' : 'SELL')).toUpperCase()} ${t.Lot ? t.Lot : '0.50'}</div>
-            <div class="rtc-sub">${App.fmtDate(t.Date)} · ${t.Entry || 'London SMC'}</div>
+            <div class="rtc-title">${t.Pair || 'XAUUSD'} · ${isBuy ? 'BUY' : 'SELL'} ${lot}</div>
+            <div class="rtc-sub">${App.fmtDate(t.Date)} · ${strategy}</div>
           </div>
           <div class="rtc-right">
             <div class="rtc-pl ${isWin ? 't-win' : 't-loss'}">${t.ProfitLoss > 0 ? '+' : ''}${fmt(t.ProfitLoss)}</div>
-            <div class="rtc-rr ${isWin ? 't-win' : 't-loss'}">${isWin ? 'RR 1:2.8' : 'Loss'}</div>
+            <div class="rtc-rr ${isWin ? 't-win' : 't-loss'}">${rrDisplay}</div>
           </div>
         </div>`;
       }).join('');
