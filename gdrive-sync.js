@@ -18,7 +18,9 @@ const GDriveSync = {
   _syncDebounce: null,
   _lastSyncTime: null,
   _silentRefreshPending: false,
+  _silentRefreshFailed: false,  // Track if silent refresh already failed this session
   _refreshTimer: null,
+  _silentTimeout: null,
 
   /**
    * Initialize Google Sync module
@@ -42,14 +44,14 @@ const GDriveSync = {
     }
 
     // Initialize GIS Token Client when Google library is ready
-    // Also attempt silent refresh if profile exists but token expired
     this._initGisClient();
 
     // When app comes back to foreground (e.g. mobile user reopens PWA),
-    // attempt silent token refresh if token is expired
+    // attempt silent token refresh ONLY if it hasn't already failed this session
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && this._userProfile && this._tokenClient) {
-        if (!this._accessToken || Date.now() >= this._tokenExpiresAt) {
+        if (!this._silentRefreshFailed && !this._silentRefreshPending
+            && (!this._accessToken || Date.now() >= this._tokenExpiresAt)) {
           console.log('[GDriveSync] App resumed — attempting silent token refresh');
           this._attemptSilentRefresh();
         }
@@ -68,29 +70,30 @@ const GDriveSync = {
         client_id: this.CLIENT_ID,
         scope: this.SCOPES,
         callback: async (resp) => {
+          // Clear the safety timeout since callback fired
+          if (this._silentTimeout) { clearTimeout(this._silentTimeout); this._silentTimeout = null; }
+
           if (resp.error) {
             console.error('Google Auth Error:', resp);
             if (this._silentRefreshPending) {
               this._silentRefreshPending = false;
+              this._silentRefreshFailed = true;  // Don't retry again this session
               this.setSyncingState(false);
-              // Silent refresh failed — user's Google session expired.
-              // DON'T show login modal immediately if user has saved profile.
-              // They can continue using the app with local data.
-              // Mark that we need re-auth for next sync.
-              console.log('[GDriveSync] Silent refresh failed, user can continue offline.');
-              // Only show login modal on first-ever visit (no saved profile)
+              console.log('[GDriveSync] Silent refresh failed, user continues with local data.');
+              // Only show login modal on first-ever visit (no saved profile at all)
               if (!this._userProfile) {
                 this.showLoginModal();
               }
             } else {
               App.toast('❌ Gagal login Google: ' + resp.error);
+              this.setSyncingState(false);
             }
-            this.setSyncingState(false);
             return;
           }
           if (resp.access_token) {
             const wasSilent = this._silentRefreshPending;
             this._silentRefreshPending = false;
+            this._silentRefreshFailed = false;  // Reset on success
             this._accessToken = resp.access_token;
             this._tokenExpiresAt = Date.now() + (parseInt(resp.expires_in, 10) || 3600) * 1000;
             localStorage.setItem('ts_google_token', this._accessToken);
@@ -103,11 +106,9 @@ const GDriveSync = {
             await this.fetchUserProfile();
 
             if (wasSilent) {
-              // Silent auto-login berhasil — restore session langsung
               this.hideLoginModal();
               await this.handlePostLoginSync();
             } else {
-              // Manual login flow
               await this.handlePostLoginSync();
             }
           }
@@ -123,7 +124,6 @@ const GDriveSync = {
         if (remainingSec > 60) {
           this._scheduleTokenRefresh(remainingSec);
         } else {
-          // Less than 1 min left, refresh now
           this._attemptSilentRefresh();
         }
       }
@@ -134,11 +134,9 @@ const GDriveSync = {
 
   /**
    * Schedule a proactive token refresh before it expires.
-   * Refreshes 5 minutes before expiry (or halfway if token life < 10 min).
    */
   _scheduleTokenRefresh(expiresInSec) {
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
-    // Refresh 5 minutes before expiry, or at half-life if < 10 min
     const refreshInMs = expiresInSec > 600
       ? (expiresInSec - 300) * 1000
       : Math.floor(expiresInSec / 2) * 1000;
@@ -151,17 +149,33 @@ const GDriveSync = {
 
   /**
    * Attempt silent token refresh (no popup).
-   * Works if the user still has an active Google session in the browser.
+   * Truly silent on mobile — NO overlay shown.
+   * Has a 4-second safety timeout in case GIS never fires the callback.
    */
   _attemptSilentRefresh() {
     if (!this._tokenClient) {
       setTimeout(() => this._attemptSilentRefresh(), 500);
       return;
     }
+    // Don't retry if already failed this session
+    if (this._silentRefreshFailed || this._silentRefreshPending) return;
+
     console.log('[GDriveSync] Attempting silent token refresh...');
     this._silentRefreshPending = true;
-    this.setSyncingState(true, 'Memulihkan sesi Google...');
-    // prompt: '' = silent (no popup); if no active session, callback gets error
+    // NO overlay — silent refresh should be invisible to the user
+
+    // Safety timeout: if GIS callback never fires (common on mobile PWA),
+    // abort after 4 seconds so the app doesn't hang
+    this._silentTimeout = setTimeout(() => {
+      if (this._silentRefreshPending) {
+        console.warn('[GDriveSync] Silent refresh timed out after 4s');
+        this._silentRefreshPending = false;
+        this._silentRefreshFailed = true;
+        this.setSyncingState(false);
+      }
+    }, 4000);
+
+    // prompt: '' = silent (no popup)
     this._tokenClient.requestAccessToken({ prompt: '' });
   },
 
@@ -415,13 +429,7 @@ const GDriveSync = {
    * Debounced auto-save to Google Drive
    */
   triggerAutoSync() {
-    if (!this.isLoggedIn()) {
-      // If we have a profile but token expired, attempt silent refresh first
-      if (this._userProfile && (!this._accessToken || Date.now() >= this._tokenExpiresAt)) {
-        this._attemptSilentRefresh();
-      }
-      return;
-    }
+    if (!this.isLoggedIn()) return;
 
     this.updateSyncBadge('syncing');
     clearTimeout(this._syncDebounce);
